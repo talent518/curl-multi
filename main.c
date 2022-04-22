@@ -1,3 +1,4 @@
+#define _GNU_SOURCE // asprintf declare
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -7,11 +8,17 @@
 #include <signal.h>
 #include <sys/time.h>
 #include <time.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <math.h>
 
 #include <curl/curl.h>
 
 typedef struct {
-    bool debug;
+    bool info;
+    char *debug;
 
     bool verbose;
     int headerc;
@@ -43,10 +50,67 @@ typedef struct {
 } config_t;
 
 typedef struct {
-    int *idx;
+    int i;
+    char *logfile;
+    FILE *logfp;
+} idx_t;
+
+typedef struct {
+    idx_t *idx;
     struct curl_slist *headers;
     struct curl_httppost *form;
+    FILE *fp_upload;
 } request_t;
+
+int debug_handler(CURL *handle, curl_infotype type, char *data, size_t size, void *userp) {
+    idx_t *idx = (idx_t*) userp;
+    int ret = 0;
+
+    if(!idx->logfp) return 0;
+
+	switch (type) {
+		case CURLINFO_HEADER_OUT:
+			do {
+				char *ptr;
+				while(size) {
+					ptr = data;
+					
+					if(*ptr) {
+						while(*ptr != '\r' && *ptr != '\n') {
+							ptr ++;
+							size --;
+						}
+						
+						if(*ptr == '\r' && *(ptr+1) == '\n') {
+							ptr +=2 ;
+							size -=2;
+						}
+					}
+					
+					fprintf(idx->logfp, "> ");
+                    fwrite(data, 1, ptr-data, idx->logfp);
+					data = ptr;
+				}
+			} while(0);
+			break;
+		case CURLINFO_DATA_OUT:
+            fwrite(data, 1, size, idx->logfp);
+			break;
+		case CURLINFO_HEADER_IN:
+            fprintf(idx->logfp, "< ");
+            fwrite(data, 1, size, idx->logfp);
+			break;
+		case CURLINFO_DATA_IN:
+            fwrite(data, 1, size, idx->logfp);
+			break;
+		case CURLINFO_TEXT:
+            fprintf(idx->logfp, "* ");
+            fwrite(data, 1, size, idx->logfp);
+			break;
+	}
+
+	return 0;
+}
 
 size_t write_callback(char *ptr, size_t size, size_t nmemb, void *userdata) {
     return size * nmemb;
@@ -56,30 +120,41 @@ size_t read_callback(char *ptr, size_t size, size_t nmemb, void *userdata) {
     return fread(ptr, size, nmemb, (FILE*) userdata);
 }
 
-CURL *make_curl(const config_t *cfg, int *idx) {
+CURL *make_curl(const config_t *cfg, idx_t *idx) {
     int i;
     CURL *curl = curl_easy_init();
     request_t *req = (request_t*) malloc(sizeof(request_t));
 
-    memset(req, 0, sizeof(*req));
+    memset(req, 0, sizeof(request_t));
     req->idx = idx;
-
 
     curl_easy_setopt(curl, CURLOPT_PRIVATE, req);
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 1);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_HEADER, 0L);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
 
-    // set URL
-    curl_easy_setopt(curl, CURLOPT_URL, cfg->urls[(*idx) ++]);
-    if(*idx >= cfg->urlc) *idx = 0;
-
-    if(cfg->verbose) {
+    if(idx->logfile) { // set DEBUG
         curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+        curl_easy_setopt(curl, CURLOPT_DEBUGDATA, idx);
+        curl_easy_setopt(curl, CURLOPT_DEBUGFUNCTION, debug_handler);
+
+        if(!idx->logfp || access(idx->logfile, F_OK)) {
+            if(idx->logfp) fclose(idx->logfp);
+            idx->logfp = fopen(idx->logfile, "w");
+            if(!idx->logfp) fprintf(stderr, "open %s failure: %s\n", idx->logfile, strerror(errno));
+        }
+    } else if(cfg->verbose) { // set VERBOSE
+        curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+        curl_easy_setopt(curl, CURLOPT_DEBUGDATA, idx);
+        curl_easy_setopt(curl, CURLOPT_DEBUGFUNCTION, debug_handler);
     } else {
         curl_easy_setopt(curl, CURLOPT_VERBOSE, 0L);
-        curl_easy_setopt(curl, CURLOPT_HEADER, 0L);
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
     }
+
+    // set URL
+    curl_easy_setopt(curl, CURLOPT_URL, cfg->urls[idx->i ++]);
+    if(idx->i >= cfg->urlc) idx->i = 0;
 
     // set HEADER
     if(cfg->headerc) {
@@ -102,12 +177,20 @@ CURL *make_curl(const config_t *cfg, int *idx) {
     // set FORM
     if(cfg->formc) {
         struct curl_httppost *lastptr = NULL;
-        for(i=0; cfg->formc; i++) {
-            curl_formadd(&req->form, &lastptr,
-                CURLFORM_PTRNAME, cfg->forms[i].name,
-                cfg->forms[i].is_file ? CURLFORM_FILE : CURLFORM_PTRCONTENTS, cfg->forms[i].value,
-                CURLFORM_END
-            );
+        for(i=0; i<cfg->formc; i++) {
+            if(cfg->forms[i].is_file) {
+                curl_formadd(&req->form, &lastptr,
+                    CURLFORM_PTRNAME, cfg->forms[i].name,
+                    CURLFORM_FILE, cfg->forms[i].value,
+                    CURLFORM_END
+                );
+            } else {
+                curl_formadd(&req->form, &lastptr,
+                    CURLFORM_PTRNAME, cfg->forms[i].name,
+                    CURLFORM_PTRCONTENTS, cfg->forms[i].value,
+                    CURLFORM_END
+                );
+            }
         }
         curl_easy_setopt(curl, CURLOPT_HTTPPOST, req->form);
     }
@@ -129,14 +212,16 @@ CURL *make_curl(const config_t *cfg, int *idx) {
 
     if(cfg->append) curl_easy_setopt(curl, CURLOPT_APPEND, 1L);
     if(cfg->upload_file) {
-        FILE *fp = fopen(cfg->upload_file, "r");
-        if(fp) {
-            fseek(fp, 0, SEEK_END);
+        req->fp_upload = fopen(cfg->upload_file, "r");
+        if(req->fp_upload) {
+            fseek(req->fp_upload, 0, SEEK_END);
             curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
-            curl_easy_setopt(curl, CURLOPT_READDATA, (void*) fp);
+            curl_easy_setopt(curl, CURLOPT_READDATA, (void*) req->fp_upload);
             curl_easy_setopt(curl, CURLOPT_READFUNCTION, read_callback);
-            curl_easy_setopt(curl, CURLOPT_INFILESIZE_LARGE, (curl_off_t) ftell(fp));
-            fseek(fp, 0, SEEK_SET);
+            curl_easy_setopt(curl, CURLOPT_INFILESIZE_LARGE, (curl_off_t) ftell(req->fp_upload));
+            fseek(req->fp_upload, 0, SEEK_SET);
+        } else {
+            fprintf(stderr, "open %s failure: %s\n", cfg->upload_file, strerror(errno));
         }
     }
 
@@ -157,11 +242,12 @@ CURL *make_curl(const config_t *cfg, int *idx) {
 enum {
     FORM_STRING = 128,
 };
-static const char *options = "hVDvH:Im:d:GF:C:f:saT:kn:t:c:";
+static const char *options = "hViD:vH:Im:d:GF:C:f:saT:kn:t:c:";
 static struct option OPTIONS[] = {
     {"help",            0, 0, 'h' },
     {"version",         0, 0, 'V' },
-    {"debug",           0, 0, 'D' },
+    {"info",            0, 0, 'i' },
+    {"debug",           1, 0, 'D' },
 
     {"verbose",         0, 0, 'v' },
     {"header",          1, 0, 'H' },
@@ -190,7 +276,8 @@ void usage(char *argv0) {
         "Usage: %s [options...] <url>...\n"
         "  -h,--help                         This help\n"
         "  -V,--version                      Show curl version\n"
-        "  -D,--debug                        Show debug info\n"
+        "  -i,--info                         Show config info\n"
+        "  -D,--debug <path>                 Save debug info to <path>\n"
 
         "  -v,--verbose                      Make the operation more talkative\n"
         "  -H,--header <header>              Set custom request header\n"
@@ -226,21 +313,26 @@ void sig_handler(int sig) {
 
 int main(int argc, char *argv[]) {
     config_t cfg;
-    int c, idx = 0, *idxs;
+    int c, ind = 0;
+    idx_t *idxs;
     CURLM *multi;
+    char fmt[64];
 
     memset(&cfg, 0, sizeof(cfg));
 
     cfg.concurrency = 10;
 
-    while((c = getopt_long(argc, argv, options, OPTIONS, &idx)) != -1) {
+    while((c = getopt_long(argc, argv, options, OPTIONS, &ind)) != -1) {
         switch(c) {
             case 'V':
                 printf("curl %s\n", LIBCURL_VERSION);
                 exit(0);
                 break;
+            case 'i':
+                cfg.info = true;
+                break;
             case 'D':
-                cfg.debug = true;
+                cfg.debug = optarg;
                 break;
 
             case 'v':
@@ -331,8 +423,9 @@ int main(int argc, char *argv[]) {
     cfg.urlc = argc - optind;
     cfg.urls = argv + optind;
 
-    if(cfg.debug) {
+    if(cfg.info) {
         printf("======== CONFIG INFO BEGIN ========\n");
+        printf("debug: %s\n", cfg.debug);
         printf("verbose: %s\n", cfg.verbose ? "true" : "false");
         printf("headers: %d\n", cfg.headerc);
         for(c=0; c<cfg.headerc; c++) {
@@ -361,15 +454,25 @@ int main(int argc, char *argv[]) {
         printf("timelimit: %d\n", cfg.timelimit);
         printf("concurrency: %d\n", cfg.concurrency);
         printf("========= CONFIG INFO END =========\n");
+        goto end;
     }
 
     curl_global_init(CURL_GLOBAL_ALL);
 
-    idxs = (int*) malloc(sizeof(int)*cfg.concurrency);
+    idxs = (idx_t*) malloc(sizeof(idx_t) * cfg.concurrency);
     multi = curl_multi_init();
 
+    memset(idxs, 0, sizeof(idx_t) * cfg.concurrency);
+
+    if(cfg.debug) {
+        snprintf(fmt, sizeof(fmt), "%%s/.debug-%%0%dd.log", (int) ceil(log10(cfg.concurrency+1)));
+        if(*cfg.debug == '\0') cfg.debug = ".";
+    }
+
     for(c=0; c<cfg.concurrency; c++) {
-        idxs[c] = 0;
+        if(cfg.debug) asprintf(&idxs[c].logfile, fmt, cfg.debug, c+1);
+        if(cfg.verbose) idxs[c].logfp = stderr;
+
         curl_multi_add_handle(multi, make_curl(&cfg, &idxs[c]));
     }
 
@@ -450,6 +553,7 @@ int main(int argc, char *argv[]) {
 
                     if(req->headers) curl_slist_free_all(req->headers);
                     if(req->form) curl_formfree(req->form);
+                    if(req->fp_upload)  fclose(req->fp_upload);
 
                     free(req);
                     req = NULL;
@@ -476,11 +580,22 @@ int main(int argc, char *argv[]) {
     curl_multi_cleanup(multi);
     curl_global_cleanup();
 
+    for(c=0; c<cfg.concurrency; c++) {
+        if(idxs[c].logfile) {
+            // unlink(idxs[c].logfile);
+            free(idxs[c].logfile);
+        }
+        if(idxs[c].logfp) {
+            fclose(idxs[c].logfp);
+        }
+    }
+    free(idxs);
+
+end:
     for(c=0; c<cfg.formc; c++) {
         free(cfg.forms[c].name);
         free(cfg.forms[c].value);
     }
-    free(idxs);
 
     return 0;
 }
