@@ -19,10 +19,6 @@ typedef struct {
     bool head;
     char *method;
     char *data;
-    char *data_ascii;
-    char *data_binary;
-    char *data_raw;
-    char *data_urlencode;
     bool get;
     int formc;
     struct {
@@ -31,9 +27,12 @@ typedef struct {
         char *value;
     } forms[128];
     char *cookie;
-    char *cookie_jar;
+    char *cookie_file;
+    bool cookie_session;
     bool append;
     char *upload_file;
+
+    bool keepalive;
 
     int urlc;
     char **urls;
@@ -43,15 +42,32 @@ typedef struct {
     int concurrency;
 } config_t;
 
+typedef struct {
+    int *idx;
+    struct curl_slist *headers;
+    struct curl_httppost *form;
+} request_t;
+
 size_t write_callback(char *ptr, size_t size, size_t nmemb, void *userdata) {
     return size * nmemb;
+}
+
+size_t read_callback(char *ptr, size_t size, size_t nmemb, void *userdata) {
+    return fread(ptr, size, nmemb, (FILE*) userdata);
 }
 
 CURL *make_curl(const config_t *cfg, int *idx) {
     int i;
     CURL *curl = curl_easy_init();
+    request_t *req = (request_t*) malloc(sizeof(request_t));
 
-    curl_easy_setopt(curl, CURLOPT_PRIVATE, idx);
+    memset(req, 0, sizeof(*req));
+    req->idx = idx;
+
+
+    curl_easy_setopt(curl, CURLOPT_PRIVATE, req);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 1);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
 
     // set URL
     curl_easy_setopt(curl, CURLOPT_URL, cfg->urls[(*idx) ++]);
@@ -66,19 +82,82 @@ CURL *make_curl(const config_t *cfg, int *idx) {
     }
 
     // set HEADER
+    if(cfg->headerc) {
+        for(i=0; i<cfg->headerc; i++) {
+            req->headers = curl_slist_append(req->headers, cfg->headers[i]);
+        }
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, req->headers);
+    }
+
+    // set DATA
+    if(cfg->data) {
+        curl_easy_setopt(curl, CURLOPT_POST, 1L);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, cfg->data);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, strlen(cfg->data));
+    }
+
+    // set HEAD
+    if(cfg->head) curl_easy_setopt(curl, CURLOPT_NOBODY, 1L);
+
+    // set FORM
+    if(cfg->formc) {
+        struct curl_httppost *lastptr = NULL;
+        for(i=0; cfg->formc; i++) {
+            curl_formadd(&req->form, &lastptr,
+                CURLFORM_PTRNAME, cfg->forms[i].name,
+                cfg->forms[i].is_file ? CURLFORM_FILE : CURLFORM_PTRCONTENTS, cfg->forms[i].value,
+                CURLFORM_END
+            );
+        }
+        curl_easy_setopt(curl, CURLOPT_HTTPPOST, req->form);
+    }
+
+    // set GET
+    if(cfg->get) curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
+
+    // set COOKIE
+    if(cfg->cookie) curl_easy_setopt(curl, CURLOPT_COOKIE, cfg->cookie);
+
+    // set COOKIE_FILE
+    if(cfg->cookie_file) {
+        curl_easy_setopt(curl, CURLOPT_COOKIEFILE, cfg->cookie_file);
+        curl_easy_setopt(curl, CURLOPT_COOKIEJAR, cfg->cookie_file);
+    }
+
+    // set COOKIE_SESSION
+    if(cfg->cookie_session) curl_easy_setopt(curl, CURLOPT_COOKIESESSION, cfg->cookie_session);
+
+    if(cfg->append) curl_easy_setopt(curl, CURLOPT_APPEND, 1L);
+    if(cfg->upload_file) {
+        FILE *fp = fopen(cfg->upload_file, "r");
+        if(fp) {
+            fseek(fp, 0, SEEK_END);
+            curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
+            curl_easy_setopt(curl, CURLOPT_READDATA, (void*) fp);
+            curl_easy_setopt(curl, CURLOPT_READFUNCTION, read_callback);
+            curl_easy_setopt(curl, CURLOPT_INFILESIZE_LARGE, (curl_off_t) ftell(fp));
+            fseek(fp, 0, SEEK_SET);
+        }
+    }
+
+    // set KEEPALIVE
+    if(cfg->keepalive) {
+        curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
+        curl_easy_setopt(curl, CURLOPT_TCP_KEEPIDLE, 120L);
+        curl_easy_setopt(curl, CURLOPT_TCP_KEEPINTVL, 60L);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 0);
+    }
+
+    // set METHOD
+    if(cfg->method) curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, cfg->method);
 
     return curl;
 }
 
 enum {
-    DATA_ASCII = 128,
-    DATA_BINARY,
-    DATA_RAW,
-    DATA_URLENCODE,
-
-    FORM_STRING,
+    FORM_STRING = 128,
 };
-static const char *options = "hVDvH:Im:d:GF:C:J:aT:n:t:c:";
+static const char *options = "hVDvH:Im:d:GF:C:f:saT:kn:t:c:";
 static struct option OPTIONS[] = {
     {"help",            0, 0, 'h' },
     {"version",         0, 0, 'V' },
@@ -89,17 +168,15 @@ static struct option OPTIONS[] = {
     {"head",            0, 0, 'I'},
     {"method",          1, 0, 'm' },
     {"data",            1, 0, 'd' },
-    {"data-ascii",      1, 0, DATA_ASCII },
-    {"data-binary",     1, 0, DATA_BINARY },
-    {"data-raw",        1, 0, DATA_RAW },
-    {"data-urlencode",  1, 0, DATA_URLENCODE },
     {"get",             0, 0, 'G' },
     {"form",            1, 0, 'F' },
     {"form-string",     1, 0, FORM_STRING },
     {"cookie",          1, 0, 'C' },
-    {"cookie-jar",      1, 0, 'J' },
+    {"cookie-file",     1, 0, 'f' },
+    {"cookie-session",  0, 0, 's' },
     {"append",          0, 0, 'a' },
     {"upload-file",     1, 0, 'T' },
+    {"keepalive",       1, 0, 'k' },
 
     {"requests",        0, 0, 'n' },
     {"timelimit",       0, 0, 't' },
@@ -120,17 +197,15 @@ void usage(char *argv0) {
         "  -I,--head                         Show document info only\n"
         "  -m,--method <method>              Custom request method\n"
         "  -d,--data <data>                  HTTP POST data\n"
-        "     --data-ascii <data>            HTTP POST ASCII data\n"
-        "     --data-binary <data>           HTTP POST binary data\n"
-        "     --data-raw <data>              HTTP POST data, '@' allowed\n"
-        "     --data-urlencode <data>        HTTP POST url encoded\n"
         "  -G,--get                          Put the post data in the URL and use GET\n"
         "  -F,--form <name=content>          Specify multipart MIME data\n"
         "     --form-string <name=string>    Specify multipart MIME data\n"
         "  -C,--cookie <data|filename>       Send cookies from string/file\n"
-        "  -J,--cookie-jar <filename>        Write cookies to <filename> after operation\n"
+        "  -f,--cookie-file <filename>       Read or write cookies file <filename>\n"
+        "  -s,--cookie-session               Start a new cookie session\n"
         "  -a,--append                       Append to target file when uploading\n"
         "  -T,--upload-file <file>           Transfer local FILE to destination\n"
+        "  -k,--keepalive                    Enable TCP keep-alive\n"
 
         "  -n,--requests <requests>          Number of requests to perform\n"
         "  -t,--timelimit <seconds>          Seconds to max. to spend on benchmarking\n"
@@ -187,18 +262,6 @@ int main(int argc, char *argv[]) {
             case 'd': // data
                 cfg.data = optarg;
                 break;
-            case DATA_ASCII: // data-ascii
-                cfg.data_ascii = optarg;
-                break;
-            case DATA_BINARY: // data-binary
-                cfg.data_binary = optarg;
-                break;
-            case DATA_RAW: // data-raw
-                cfg.data_raw = optarg;
-                break;
-            case DATA_URLENCODE: // data-urlencode
-                cfg.data_urlencode = optarg;
-                break;
             case 'G': // get
                 cfg.get = true;
                 break;
@@ -225,14 +288,20 @@ int main(int argc, char *argv[]) {
             case 'C': // cookie
                 cfg.cookie = optarg;
                 break;
-            case 'J': // cookie-jar
-                cfg.cookie_jar = optarg;
+            case 'f':
+                cfg.cookie_file = optarg;
+                break;
+            case 's':
+                cfg.cookie_session = true;
                 break;
             case 'a':
                 cfg.append = true;
                 break;
             case 'T':
                 cfg.upload_file = optarg;
+                break;
+            case 'k':
+                cfg.keepalive = true;
                 break;
             
             case 'n': // requests
@@ -272,19 +341,16 @@ int main(int argc, char *argv[]) {
         printf("head: %s\n", cfg.head ? "true" : "false");
         printf("method: %s\n", cfg.method);
         printf("data: %s\n", cfg.data);
-        printf("data_ascii: %s\n", cfg.data_ascii);
-        printf("data_binary: %s\n", cfg.data_binary);
-        printf("data_raw: %s\n", cfg.data_raw);
-        printf("data_urlencode: %s\n", cfg.data_urlencode);
         printf("get: %s\n", cfg.get ? "true" : "false");
         printf("forms: %d\n", cfg.formc);
         for(c=0; c<cfg.formc; c++) {
             printf("  %d => is_file: %s, name: %s, value: %s\n", c, cfg.forms[c].is_file ? "true" : "false", cfg.forms[c].name, cfg.forms[c].value);
         }
         printf("cookie: %s\n", cfg.cookie);
-        printf("cookie_jar: %s\n", cfg.cookie_jar);
+        printf("cookie_file: %s\n", cfg.cookie_file);
         printf("append: %s\n", cfg.append ? "true" : "false");
         printf("upload_file: %s\n", cfg.upload_file);
+        printf("keepalive: %s\n", cfg.keepalive ? "true" : "false");
         printf("\n");
         printf("urls: %d\n", cfg.urlc);
         for(c=0; c<cfg.urlc; c++) {
@@ -331,7 +397,8 @@ int main(int argc, char *argv[]) {
         CURL *curl;
         CURLMcode mc;
         struct CURLMsg *m;
-        int *idx, code;
+        request_t *req;
+        int code;
         int code1xx = 0, code2xx = 0, code3xx = 0, code4xx = 0, code5xx = 0, codex = 0;
         int concurrency = cfg.concurrency;
         int times = 0;
@@ -353,9 +420,9 @@ int main(int argc, char *argv[]) {
                     curl = m->easy_handle;
 
                     code = 0;
-                    idx = NULL;
+                    req = NULL;
                     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
-                    curl_easy_getinfo(curl, CURLINFO_PRIVATE, &idx);
+                    curl_easy_getinfo(curl, CURLINFO_PRIVATE, &req);
 
                     curl_multi_remove_handle(multi, curl);
                     curl_easy_cleanup(curl);
@@ -376,10 +443,16 @@ int main(int argc, char *argv[]) {
                     }
 
                     if(is_running && (cfg.requests <= 0 || requests < cfg.requests) && (cfg.timelimit <= 0 || timelimit >= time(NULL))) {
-                        curl_multi_add_handle(multi, make_curl(&cfg, idx));
+                        curl_multi_add_handle(multi, make_curl(&cfg, req->idx));
                     } else {
                         concurrency --;
                     }
+
+                    if(req->headers) curl_slist_free_all(req->headers);
+                    if(req->form) curl_formfree(req->form);
+
+                    free(req);
+                    req = NULL;
                 }
             } while(msgs);
 
@@ -407,6 +480,7 @@ int main(int argc, char *argv[]) {
         free(cfg.forms[c].name);
         free(cfg.forms[c].value);
     }
+    free(idxs);
 
     return 0;
 }
