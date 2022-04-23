@@ -62,9 +62,30 @@ typedef struct {
     FILE *fp_upload;
 } request_t;
 
+static long int req_bytes = 0, res_bytes = 0, bug_bytes = 0;
+int debug_bytes_handler(CURL *handle, curl_infotype type, char *data, size_t size, void *userp) {
+    switch (type) {
+		case CURLINFO_HEADER_OUT:
+		case CURLINFO_DATA_OUT:
+			res_bytes += size;
+			break;
+		case CURLINFO_HEADER_IN:
+		case CURLINFO_DATA_IN:
+			req_bytes += size;
+			break;
+		case CURLINFO_TEXT:
+			bug_bytes += size;
+			break;
+	}
+
+    return 0;
+}
+
 int debug_handler(CURL *handle, curl_infotype type, char *data, size_t size, void *userp) {
     idx_t *idx = (idx_t*) userp;
     int ret = 0;
+
+    debug_bytes_handler(handle, type, data, size, userp);
 
     if(!idx->logfp) return 0;
 
@@ -149,7 +170,8 @@ CURL *make_curl(const config_t *cfg, idx_t *idx) {
         curl_easy_setopt(curl, CURLOPT_DEBUGDATA, idx);
         curl_easy_setopt(curl, CURLOPT_DEBUGFUNCTION, debug_handler);
     } else {
-        curl_easy_setopt(curl, CURLOPT_VERBOSE, 0L);
+        curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+        curl_easy_setopt(curl, CURLOPT_DEBUGFUNCTION, debug_bytes_handler);
     }
 
     // set URL
@@ -179,11 +201,15 @@ CURL *make_curl(const config_t *cfg, idx_t *idx) {
         struct curl_httppost *lastptr = NULL;
         for(i=0; i<cfg->formc; i++) {
             if(cfg->forms[i].is_file) {
-                curl_formadd(&req->form, &lastptr,
-                    CURLFORM_PTRNAME, cfg->forms[i].name,
-                    CURLFORM_FILE, cfg->forms[i].value,
-                    CURLFORM_END
-                );
+                if(access(cfg->forms[i].value, R_OK)) {
+                    fprintf(stderr, "form file not exists: name: %s, value: %s\n", cfg->forms[i].name, cfg->forms[i].value);
+                } else {
+                    curl_formadd(&req->form, &lastptr,
+                        CURLFORM_PTRNAME, cfg->forms[i].name,
+                        CURLFORM_FILE, cfg->forms[i].value,
+                        CURLFORM_END
+                    );
+                }
             } else {
                 curl_formadd(&req->form, &lastptr,
                     CURLFORM_PTRNAME, cfg->forms[i].name,
@@ -360,7 +386,7 @@ int main(int argc, char *argv[]) {
             case FORM_STRING: // form-string
             case 'F': { // form
                 if(cfg.formc >= sizeof(cfg.forms)/sizeof(cfg.forms[0])) {
-                    printf("form argument too many: %s\n", optarg);
+                    fprintf(stderr, "form argument too many: %s\n", optarg);
                     break;
                 }
                 char *p = strchr(optarg, '=');
@@ -370,6 +396,11 @@ int main(int argc, char *argv[]) {
                     cfg.forms[cfg.formc].is_file = is_file;
                     cfg.forms[cfg.formc].name = strndup(optarg, p - optarg);
                     cfg.forms[cfg.formc].value = strdup(is_file ? p + 1 : p);
+                    if(is_file && access(cfg.forms[cfg.formc].value, R_OK)) {
+                        fprintf(stderr, "form file not exists: name: %s, value: %s\n", cfg.forms[cfg.formc].name, cfg.forms[cfg.formc].value);
+                        cfg.formc++;
+                        goto end;
+                    }
                 } else {
                     cfg.forms[cfg.formc].name = strdup(optarg);
                     cfg.forms[cfg.formc].value = strdup("");
@@ -391,6 +422,10 @@ int main(int argc, char *argv[]) {
                 break;
             case 'T':
                 cfg.upload_file = optarg;
+                if(access(cfg.upload_file, R_OK)) {
+                    fprintf(stderr, "upload file not exists: %s\n", cfg.upload_file);
+                    goto end;
+                }
                 break;
             case 'k':
                 cfg.keepalive = true;
@@ -469,6 +504,8 @@ int main(int argc, char *argv[]) {
         if(*cfg.debug == '\0') cfg.debug = ".";
     }
 
+    if(cfg.requests > 0 && cfg.concurrency > cfg.requests) cfg.concurrency = cfg.requests;
+
     for(c=0; c<cfg.concurrency; c++) {
         if(cfg.debug) asprintf(&idxs[c].logfile, fmt, cfg.debug, c+1);
         if(cfg.verbose) idxs[c].logfp = stderr;
@@ -496,14 +533,16 @@ int main(int argc, char *argv[]) {
 
     {
         time_t timelimit = time(NULL) + cfg.timelimit;
-        int still_running, msgs, requests = 0, prevs = 0;
+        int still_running, msgs;
         CURL *curl;
         CURLMcode mc;
         struct CURLMsg *m;
         request_t *req;
         int code;
-        int code1xx = 0, code2xx = 0, code3xx = 0, code4xx = 0, code5xx = 0, codex = 0;
+        int code0xx = 0, code1xx = 0, code2xx = 0, code3xx = 0, code4xx = 0, code5xx = 0, codex = 0;
         int concurrency = cfg.concurrency;
+        int begin_reqs = cfg.concurrency, end_reqs = 0, prev_reqs = 0;
+        long int prev_req_bytes = 0, prev_res_bytes = 0, prev_bug_bytes = 0;
         int times = 0;
 
         do {
@@ -511,7 +550,7 @@ int main(int argc, char *argv[]) {
             mc = curl_multi_perform(multi, &still_running);
 
             if(mc) {
-                printf("curl_multi_perform error: %s\n", curl_multi_strerror(mc));
+                fprintf(stderr, "curl_multi_perform error: %s\n", curl_multi_strerror(mc));
                 break;
             }
 
@@ -519,7 +558,7 @@ int main(int argc, char *argv[]) {
                 msgs = 0;
                 m = curl_multi_info_read(multi, &msgs);
                 if(m && (m->msg && CURLMSG_DONE)) {
-                    requests ++;
+                    end_reqs ++;
                     curl = m->easy_handle;
 
                     code = 0;
@@ -531,7 +570,9 @@ int main(int argc, char *argv[]) {
                     curl_easy_cleanup(curl);
                     curl = NULL;
 
-                    if(code < 200) {
+                    if(code < 100) {
+                        code0xx ++;
+                    } else if(code < 200) {
                         code1xx ++;
                     } else if(code < 300) {
                         code2xx ++;
@@ -545,7 +586,8 @@ int main(int argc, char *argv[]) {
                         codex ++;
                     }
 
-                    if(is_running && (cfg.requests <= 0 || requests < cfg.requests) && (cfg.timelimit <= 0 || timelimit >= time(NULL))) {
+                    if(is_running && (cfg.requests <= 0 || begin_reqs < cfg.requests) && (cfg.timelimit <= 0 || timelimit >= time(NULL))) {
+                        begin_reqs ++;
                         curl_multi_add_handle(multi, make_curl(&cfg, req->idx));
                     } else {
                         concurrency --;
@@ -563,18 +605,23 @@ int main(int argc, char *argv[]) {
             if(still_running) {
                 mc = curl_multi_poll(multi, NULL, 0, 1000, NULL);
                 if(mc) {
-                    printf("curl_multi_poll error: %s\n", curl_multi_strerror(mc));
+                    fprintf(stderr, "curl_multi_poll error: %s\n", curl_multi_strerror(mc));
                     break;
                 }
             }
 
             if(is_timer || !concurrency) {
                 is_timer = false;
-                if(!is_running && isatty(2)) printf("\033[2K\r");
-                printf("times: %d, concurrency: %d, 1xx: %d, 2xx: %d, 3xx: %d, 4xx: %d, 5xx: %d, xxx: %d, reqs: %d/s\n", ++times, concurrency, code1xx, code2xx, code3xx, code4xx, code5xx, codex, requests - prevs);
-                prevs = requests;
+                if(!is_running && isatty(1)) printf("\033[2K\r");
+                printf("times: %d, concurrency: %d, 0xx: %d, 1xx: %d, 2xx: %d, 3xx: %d, 4xx: %d, 5xx: %d, xxx: %d, reqs: %d/s, bytes: %ld/%ld/%ld\n", ++times, concurrency, code0xx, code1xx, code2xx, code3xx, code4xx, code5xx, codex, end_reqs - prev_reqs, req_bytes - prev_reqs, res_bytes - prev_res_bytes, bug_bytes - prev_bug_bytes);
+                prev_reqs = end_reqs;
+                prev_req_bytes = req_bytes;
+                prev_res_bytes = res_bytes;
+                prev_bug_bytes = bug_bytes;
             }
         } while(concurrency);
+
+        // printf("begin_reqs: %d, end_reqs: %d\n", begin_reqs, end_reqs); // begin_reqs equals end_reqs
     }
 
     curl_multi_cleanup(multi);
