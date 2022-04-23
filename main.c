@@ -80,6 +80,24 @@ char *nowtime(void) {
 	return buf;
 }
 
+char *fsize(long int size, char *buf) {
+    const char *units = "0KMGTPEZY";
+    int unit;
+
+    if(size <= 0) {
+        return "0.000";
+    }
+    
+    unit = (int)(log(size)/log(1024));
+    if(unit > 8) {
+        unit = 8;
+    }
+
+    sprintf(buf, "%.2lf%c", size / pow(1024,unit), units[unit]);
+
+    return buf;
+}
+
 static long int req_bytes = 0, res_bytes = 0, bug_bytes = 0;
 int debug_bytes_handler(CURL *handle, curl_infotype type, char *data, size_t size, void *userp) {
     switch (type) {
@@ -566,6 +584,7 @@ int main(int argc, char *argv[]) {
         int begin_reqs = cfg.concurrency, end_reqs = 0, prev_reqs = 0;
         long int prev_req_bytes = 0, prev_res_bytes = 0, prev_bug_bytes = 0;
         int times = 0;
+        char bufs[3][32];
 
         do {
             still_running = 0;
@@ -637,7 +656,7 @@ int main(int argc, char *argv[]) {
             if(is_timer || !concurrency) {
                 is_timer = false;
                 if(!is_running && isatty(1)) printf("\033[2K\r");
-                printf("times: %d, concurrency: %d, 0xx: %d, 1xx: %d, 2xx: %d, 3xx: %d, 4xx: %d, 5xx: %d, xxx: %d, reqs: %d/s, bytes: %ld/%ld/%ld\n", ++times, concurrency, code0xx, code1xx, code2xx, code3xx, code4xx, code5xx, codex, end_reqs - prev_reqs, req_bytes - prev_reqs, res_bytes - prev_res_bytes, bug_bytes - prev_bug_bytes);
+                printf("times: %d, concurrency: %d, 0xx: %d, 1xx: %d, 2xx: %d, 3xx: %d, 4xx: %d, 5xx: %d, xxx: %d, reqs: %d/s, bytes: %s/%s/%s\n", ++times, concurrency, code0xx, code1xx, code2xx, code3xx, code4xx, code5xx, codex, end_reqs - prev_reqs, fsize(req_bytes - prev_req_bytes, bufs[0]), fsize(res_bytes - prev_res_bytes, bufs[1]), fsize(bug_bytes - prev_bug_bytes, bufs[2]));
                 prev_reqs = end_reqs;
                 prev_req_bytes = req_bytes;
                 prev_res_bytes = res_bytes;
