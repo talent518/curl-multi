@@ -51,6 +51,7 @@ typedef struct {
 
 typedef struct {
     int i;
+    int reqs;
     char *logfile;
     FILE *logfp;
 } idx_t;
@@ -61,6 +62,23 @@ typedef struct {
     struct curl_httppost *form;
     FILE *fp_upload;
 } request_t;
+
+char *nowtime(void) {
+	static char buf[32];
+	struct timeval tv = {0, 0};
+	struct tm tm;
+
+	gettimeofday(&tv, NULL);
+	localtime_r(&tv.tv_sec, &tm);
+
+	snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d.%06ld",
+		tm.tm_year + 1900, tm.tm_mon, tm.tm_mday,
+		tm.tm_hour, tm.tm_min, tm.tm_sec,
+		tv.tv_usec
+	);
+
+	return buf;
+}
 
 static long int req_bytes = 0, res_bytes = 0, bug_bytes = 0;
 int debug_bytes_handler(CURL *handle, curl_infotype type, char *data, size_t size, void *userp) {
@@ -108,7 +126,7 @@ int debug_handler(CURL *handle, curl_infotype type, char *data, size_t size, voi
 						}
 					}
 					
-					fprintf(idx->logfp, "> ");
+					fprintf(idx->logfp, "%s > ", nowtime());
                     fwrite(data, 1, ptr-data, idx->logfp);
 					data = ptr;
 				}
@@ -118,14 +136,14 @@ int debug_handler(CURL *handle, curl_infotype type, char *data, size_t size, voi
             fwrite(data, 1, size, idx->logfp);
 			break;
 		case CURLINFO_HEADER_IN:
-            fprintf(idx->logfp, "< ");
+            fprintf(idx->logfp, "%s < ", nowtime());
             fwrite(data, 1, size, idx->logfp);
 			break;
 		case CURLINFO_DATA_IN:
             fwrite(data, 1, size, idx->logfp);
 			break;
 		case CURLINFO_TEXT:
-            fprintf(idx->logfp, "* ");
+            fprintf(idx->logfp, "%s * ", nowtime());
             fwrite(data, 1, size, idx->logfp);
 			break;
 	}
@@ -173,6 +191,8 @@ CURL *make_curl(const config_t *cfg, idx_t *idx) {
         curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
         curl_easy_setopt(curl, CURLOPT_DEBUGFUNCTION, debug_bytes_handler);
     }
+
+    if(idx->logfp) fprintf(idx->logfp, "%s * BEGIN %dst REQUEST\n", nowtime(), ++ idx->reqs);
 
     // set URL
     curl_easy_setopt(curl, CURLOPT_URL, cfg->urls[idx->i ++]);
@@ -585,6 +605,8 @@ int main(int argc, char *argv[]) {
                     } else {
                         codex ++;
                     }
+
+                    if(req->idx->logfp) fprintf(req->idx->logfp, "%s * END %dst REQUEST\n", nowtime(), req->idx->reqs);
 
                     if(is_running && (cfg.requests <= 0 || begin_reqs < cfg.requests) && (cfg.timelimit <= 0 || timelimit >= time(NULL))) {
                         begin_reqs ++;
