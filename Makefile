@@ -1,6 +1,6 @@
 CC := gcc
 PKG_CONFIG := pkg-config
-CFLAGS := -g $(shell $(PKG_CONFIG) --cflags libcurl)
+CFLAGS := -g -O2 -Wno-unused-result $(shell $(PKG_CONFIG) --cflags libcurl)
 LFLAGS := -lm $(shell $(PKG_CONFIG) --libs libcurl) -Wl,-rpath,$(shell $(PKG_CONFIG) --variable=libdir libcurl)
 
 all: curl-multi

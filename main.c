@@ -54,6 +54,7 @@ typedef struct {
     int reqs;
     char *logfile;
     FILE *logfp;
+    double time;
 } idx_t;
 
 typedef struct {
@@ -64,7 +65,7 @@ typedef struct {
 } request_t;
 
 char *nowtime(void) {
-	static char buf[32];
+	static char buf[64];
 	struct timeval tv = {0, 0};
 	struct tm tm;
 
@@ -96,6 +97,14 @@ char *fsize(long int size, char *buf) {
     sprintf(buf, "%.2lf%c", size / pow(1024,unit), units[unit]);
 
     return buf;
+}
+
+double microtime() {
+    struct timeval tv = {0, 0};
+
+    if(gettimeofday(&tv, NULL)) tv.tv_sec = time(NULL);
+
+    return (double) tv.tv_sec + tv.tv_usec / 1000000.0f;
 }
 
 static long int req_bytes = 0, res_bytes = 0, bug_bytes = 0;
@@ -299,6 +308,8 @@ CURL *make_curl(const config_t *cfg, idx_t *idx) {
 
     // set METHOD
     if(cfg->method) curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, cfg->method);
+
+    idx->time = microtime();
 
     return curl;
 }
@@ -579,12 +590,16 @@ int main(int argc, char *argv[]) {
         struct CURLMsg *m;
         request_t *req;
         int code;
-        int code0xx = 0, code1xx = 0, code2xx = 0, code3xx = 0, code4xx = 0, code5xx = 0, codex = 0;
         int concurrency = cfg.concurrency;
-        int begin_reqs = cfg.concurrency, end_reqs = 0, prev_reqs = 0;
+        long int code0xx = 0, code1xx = 0, code2xx = 0, code3xx = 0, code4xx = 0, code5xx = 0, codex = 0;
+        long int begin_reqs = cfg.concurrency, end_reqs = 0, prev_reqs = 0;
         long int prev_req_bytes = 0, prev_res_bytes = 0, prev_bug_bytes = 0;
         int times = 0;
+        double req_times[10000];
+        const long int req_timec = sizeof(req_times) / sizeof(req_times[0]);
         char bufs[3][32];
+
+        memset(req_times, 0, sizeof(req_times));
 
         do {
             still_running = 0;
@@ -599,7 +614,6 @@ int main(int argc, char *argv[]) {
                 msgs = 0;
                 m = curl_multi_info_read(multi, &msgs);
                 if(m && (m->msg && CURLMSG_DONE)) {
-                    end_reqs ++;
                     curl = m->easy_handle;
 
                     code = 0;
@@ -627,7 +641,10 @@ int main(int argc, char *argv[]) {
                         codex ++;
                     }
 
-                    if(req->idx->logfp) fprintf(req->idx->logfp, "%s * END %dst REQUEST\n", nowtime(), req->idx->reqs);
+                    req_times[end_reqs % req_timec] = microtime() - req->idx->time;
+                    end_reqs ++;
+
+                    if(req->idx->logfp) fprintf(req->idx->logfp, "%s * END %dst REQUEST - %lf\n", nowtime(), req->idx->reqs,  microtime() - req->idx->time);
 
                     if(is_running && (cfg.requests <= 0 || begin_reqs < cfg.requests) && (cfg.timelimit <= 0 || timelimit >= time(NULL))) {
                         begin_reqs ++;
@@ -656,7 +673,18 @@ int main(int argc, char *argv[]) {
             if(is_timer || !concurrency) {
                 is_timer = false;
                 if(!is_running && isatty(1)) printf("\033[2K\r");
-                printf("times: %d, concurrency: %d, 0xx: %d, 1xx: %d, 2xx: %d, 3xx: %d, 4xx: %d, 5xx: %d, xxx: %d, reqs: %d/s, bytes: %s/%s/%s\n", ++times, concurrency, code0xx, code1xx, code2xx, code3xx, code4xx, code5xx, codex, end_reqs - prev_reqs, fsize(req_bytes - prev_req_bytes, bufs[0]), fsize(res_bytes - prev_res_bytes, bufs[1]), fsize(bug_bytes - prev_bug_bytes, bufs[2]));
+
+                double min = 0xffffffff, avg = 0, max = 0;
+                for(c=0; c<req_timec && c<end_reqs; c++) {
+                    if(req_times[c] < min) min = req_times[c];
+                    avg += req_times[c];
+                    if(req_times[c] > max) max = req_times[c];
+                }
+                avg /= c;
+
+
+                printf("times: %d, concurrency: %d, 0xx: %ld, 1xx: %ld, 2xx: %ld, 3xx: %ld, 4xx: %ld, 5xx: %ld, xxx: %ld, reqs: %ld/s, bytes: %s/%s/%s, min: %.1lfms, avg: %.1lfms, max: %.1lfms\n", ++times, concurrency, code0xx, code1xx, code2xx, code3xx, code4xx, code5xx, codex, end_reqs - prev_reqs, fsize(req_bytes - prev_req_bytes, bufs[0]), fsize(res_bytes - prev_res_bytes, bufs[1]), fsize(bug_bytes - prev_bug_bytes, bufs[2]), min * 1000.0f, avg * 1000.0f, max * 1000.0f);
+
                 prev_reqs = end_reqs;
                 prev_req_bytes = req_bytes;
                 prev_res_bytes = res_bytes;
