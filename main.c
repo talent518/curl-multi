@@ -449,6 +449,8 @@ int main(int argc, char *argv[]) {
                 break;
             case 'k':
                 cfg.keepalive = true;
+                cfg.headers[cfg.headerc++] = "Connection: Keep-alive";
+                cfg.headers[cfg.headerc++] = "Keep-Alive: timeout=20";
                 break;
             
             case 'n': // requests
