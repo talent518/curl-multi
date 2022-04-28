@@ -13,6 +13,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <math.h>
+#include <ctype.h>
 
 #include <curl/curl.h>
 
@@ -41,7 +42,7 @@ typedef struct {
 
     bool keepalive;
 
-    int urlc;
+    int urlc, *urlw;
     char **urls;
 
     int requests;
@@ -50,7 +51,7 @@ typedef struct {
 } config_t;
 
 typedef struct {
-    int i;
+    int i, w;
     int reqs;
     char *logfile;
     FILE *logfp;
@@ -221,9 +222,28 @@ CURL *make_curl(const config_t *cfg, idx_t *idx) {
 
     if(idx->logfp) fprintf(idx->logfp, "%s * BEGIN %dst REQUEST\n", nowtime(), ++ idx->reqs);
 
+    // weight
+    if(cfg->urlw) {
+        if(idx->w < cfg->urlw[idx->i]) {
+            i = idx->i;
+            if(++idx->w >= cfg->urlw[idx->i]) {
+                idx->i ++;
+                idx->w = 0;
+            }
+        } else {
+            idx->w = 0;
+            i = idx->i ++;
+        }
+    } else {
+        i = idx->i ++;
+    }
+    if(idx->i >= cfg->urlc) {
+        idx->i = 0;
+    }
+    // printf("  %d => [%d] %s\n", i, cfg->urlw ? cfg->urlw[i] : 1, cfg->urls[i]);
+
     // set URL
-    curl_easy_setopt(curl, CURLOPT_URL, cfg->urls[idx->i ++]);
-    if(idx->i >= cfg->urlc) idx->i = 0;
+    curl_easy_setopt(curl, CURLOPT_URL, cfg->urls[i]);
 
     // set HEADER
     if(cfg->headerc) {
@@ -317,7 +337,7 @@ CURL *make_curl(const config_t *cfg, idx_t *idx) {
 enum {
     FORM_STRING = 128,
 };
-static const char *options = "hViD:vH:Im:d:GF:C:f:saT:kn:t:c:";
+static const char *options = "hViD:vH:Im:d:GF:C:f:saT:kn:t:c:w:";
 static struct option OPTIONS[] = {
     {"help",            0, 0, 'h' },
     {"version",         0, 0, 'V' },
@@ -342,6 +362,8 @@ static struct option OPTIONS[] = {
     {"requests",        0, 0, 'n' },
     {"timelimit",       0, 0, 't' },
     {"concurrency",     0, 0, 'c' },
+
+    {"weight",     0, 0, 'w' },
 
     {NULL,              0, 0, 0 }
 };
@@ -372,6 +394,8 @@ void usage(char *argv0) {
         "  -n,--requests <requests>          Number of requests to perform\n"
         "  -t,--timelimit <seconds>          Seconds to max. to spend on benchmarking\n"
         "  -c,--concurrency <concurrency>    Number of multiple requests to make at a time\n"
+
+        "  -w,--weight <weight>              URL weights\n"
         , argv0
     );
 }
@@ -391,7 +415,7 @@ int main(int argc, char *argv[]) {
     int c, ind = 0;
     idx_t *idxs;
     CURLM *multi;
-    char fmt[64];
+    char fmt[64], *weight = NULL;
 
     memset(&cfg, 0, sizeof(cfg));
 
@@ -440,7 +464,6 @@ int main(int argc, char *argv[]) {
                 }
                 char *p = strchr(optarg, '=');
                 if(p) {
-                    *p++ = '\0';
                     bool is_file = (c == 'F' && *p == '@');
                     cfg.forms[cfg.formc].is_file = is_file;
                     cfg.forms[cfg.formc].name = strndup(optarg, p - optarg);
@@ -493,6 +516,10 @@ int main(int argc, char *argv[]) {
                 if(cfg.concurrency <= 0) cfg.concurrency = 1;
                 break;
 
+            case 'w': // weight
+                weight = optarg;
+                break;
+
             case 'h':
             default:
                 usage(argv[0]);
@@ -508,6 +535,22 @@ int main(int argc, char *argv[]) {
 
     cfg.urlc = argc - optind;
     cfg.urls = argv + optind;
+
+    if(weight) {
+        cfg.urlw = (int*) malloc(sizeof(int) * cfg.urlc);
+        for(c=0; c<cfg.urlc; c++) {
+            if(isdigit(*weight)) {
+                cfg.urlw[c] = atoi(weight);
+                if(cfg.urlw[c] <= 0) {
+                    cfg.urlw[c] = 1;
+                }
+                while(isdigit(*weight)) weight ++;
+                if(*weight && !isdigit(*weight)) weight ++;
+            } else {
+                cfg.urlw[c] = 1;
+            }
+        }
+    }
 
     if(cfg.info) {
         printf("======== CONFIG INFO BEGIN ========\n");
@@ -533,7 +576,7 @@ int main(int argc, char *argv[]) {
         printf("\n");
         printf("urls: %d\n", cfg.urlc);
         for(c=0; c<cfg.urlc; c++) {
-            printf("  %d => %s\n", c, cfg.urls[c]);
+            printf("  %d => [%d] %s\n", c, cfg.urlw ? cfg.urlw[c] : 1, cfg.urls[c]);
         }
         printf("\n");
         printf("requests: %d\n", cfg.requests);
@@ -682,7 +725,6 @@ int main(int argc, char *argv[]) {
                 }
                 avg /= c;
 
-
                 printf("times: %d, concurrency: %d, 0xx: %ld, 1xx: %ld, 2xx: %ld, 3xx: %ld, 4xx: %ld, 5xx: %ld, xxx: %ld, reqs: %ld/s, bytes: %s/%s/%s, min: %.1lfms, avg: %.1lfms, max: %.1lfms\n", ++times, concurrency, code0xx, code1xx, code2xx, code3xx, code4xx, code5xx, codex, end_reqs - prev_reqs, fsize(req_bytes - prev_req_bytes, bufs[0]), fsize(res_bytes - prev_res_bytes, bufs[1]), fsize(bug_bytes - prev_bug_bytes, bufs[2]), min * 1000.0f, avg * 1000.0f, max * 1000.0f);
 
                 prev_reqs = end_reqs;
@@ -708,6 +750,10 @@ int main(int argc, char *argv[]) {
         }
     }
     free(idxs);
+
+    if(cfg.urlw) {
+        free(cfg.urlw);
+    }
 
 end:
     for(c=0; c<cfg.formc; c++) {
