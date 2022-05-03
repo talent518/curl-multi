@@ -723,7 +723,11 @@ int main(int argc, char *argv[]) {
                     avg += req_times[c];
                     if(req_times[c] > max) max = req_times[c];
                 }
-                avg /= c;
+                if(c > 0) {
+                	avg /= c;
+                } else {
+                	min = 0;
+                }
 
                 printf("times: %d, concurrency: %d, 0xx: %ld, 1xx: %ld, 2xx: %ld, 3xx: %ld, 4xx: %ld, 5xx: %ld, xxx: %ld, reqs: %ld/s, bytes: %s/%s/%s, min: %.1lfms, avg: %.1lfms, max: %.1lfms\n", ++times, concurrency, code0xx, code1xx, code2xx, code3xx, code4xx, code5xx, codex, end_reqs - prev_reqs, fsize(req_bytes - prev_req_bytes, bufs[0]), fsize(res_bytes - prev_res_bytes, bufs[1]), fsize(bug_bytes - prev_bug_bytes, bufs[2]), min * 1000.0f, avg * 1000.0f, max * 1000.0f);
 
