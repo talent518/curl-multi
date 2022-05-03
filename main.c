@@ -321,9 +321,9 @@ CURL *make_curl(const config_t *cfg, idx_t *idx) {
     // set KEEPALIVE
     if(cfg->keepalive) {
         curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
-        curl_easy_setopt(curl, CURLOPT_TCP_KEEPIDLE, 120L);
-        curl_easy_setopt(curl, CURLOPT_TCP_KEEPINTVL, 60L);
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 0);
+        curl_easy_setopt(curl, CURLOPT_TCP_KEEPIDLE, 30L);
+        curl_easy_setopt(curl, CURLOPT_TCP_KEEPINTVL, 30L);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
     }
 
     // set METHOD
