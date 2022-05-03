@@ -16,3 +16,4 @@ curl-multi: main.o
 
 clean:
 	@LANG=en rm -vf *.o curl-multi
+

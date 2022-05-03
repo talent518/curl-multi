@@ -363,7 +363,7 @@ static struct option OPTIONS[] = {
     {"timelimit",       0, 0, 't' },
     {"concurrency",     0, 0, 'c' },
 
-    {"weight",     0, 0, 'w' },
+    {"weight",          0, 0, 'w' },
 
     {NULL,              0, 0, 0 }
 };
@@ -627,7 +627,7 @@ int main(int argc, char *argv[]) {
 
     {
         time_t timelimit = time(NULL) + cfg.timelimit;
-        int still_running, msgs;
+        volatile int still_running, msgs;
         CURL *curl;
         CURLMcode mc;
         struct CURLMsg *m;
@@ -646,7 +646,7 @@ int main(int argc, char *argv[]) {
 
         do {
             still_running = 0;
-            mc = curl_multi_perform(multi, &still_running);
+            mc = curl_multi_perform(multi, (int*) &still_running);
 
             if(mc) {
                 fprintf(stderr, "curl_multi_perform error: %s\n", curl_multi_strerror(mc));
@@ -655,7 +655,7 @@ int main(int argc, char *argv[]) {
 
             do {
                 msgs = 0;
-                m = curl_multi_info_read(multi, &msgs);
+                m = curl_multi_info_read(multi, (int*) &msgs);
                 if(m && (m->msg && CURLMSG_DONE)) {
                     curl = m->easy_handle;
 
