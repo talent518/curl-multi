@@ -40,7 +40,9 @@ typedef struct {
     bool append;
     char *upload_file;
 
-    bool keepalive;
+    int keepalive;
+    int timeout;
+    int connect_timeout;
 
     int urlc, *urlw;
     char **urls;
@@ -56,14 +58,14 @@ typedef struct {
     char *logfile;
     FILE *logfp;
     double time;
-} idx_t;
 
-typedef struct {
-    idx_t *idx;
     struct curl_slist *headers;
     struct curl_httppost *form;
     FILE *fp_upload;
-} request_t;
+    
+    bool keepalive;
+    CURL *curl;
+} idx_t;
 
 char *nowtime(void) {
 	static char buf[64];
@@ -187,18 +189,30 @@ size_t read_callback(char *ptr, size_t size, size_t nmemb, void *userdata) {
     return fread(ptr, size, nmemb, (FILE*) userdata);
 }
 
+size_t header_callback(char *ptr, size_t size, size_t nmemb, void *userdata) {
+	size_t written = size * nmemb;
+	idx_t *idx = (idx_t*) userdata;
+	
+	if(written >= 22 && !strncasecmp(ptr, "Connection: keep-alive", 22)) {
+		idx->keepalive = true;
+	}
+	
+	return written;
+}
+
 CURL *make_curl(const config_t *cfg, idx_t *idx) {
     int i;
-    CURL *curl = curl_easy_init();
-    request_t *req = (request_t*) malloc(sizeof(request_t));
+    CURL *curl = (idx->curl ? idx->curl : curl_easy_init());
+    
+    idx->keepalive = false;
 
-    memset(req, 0, sizeof(request_t));
-    req->idx = idx;
-
-    curl_easy_setopt(curl, CURLOPT_PRIVATE, req);
+    curl_easy_setopt(curl, CURLOPT_PRIVATE, idx);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 1);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_HEADER, 0L);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, idx);
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
 
     if(idx->logfile) { // set DEBUG
@@ -248,9 +262,9 @@ CURL *make_curl(const config_t *cfg, idx_t *idx) {
     // set HEADER
     if(cfg->headerc) {
         for(i=0; i<cfg->headerc; i++) {
-            req->headers = curl_slist_append(req->headers, cfg->headers[i]);
+            idx->headers = curl_slist_append(idx->headers, cfg->headers[i]);
         }
-        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, req->headers);
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, idx->headers);
     }
 
     // set DATA
@@ -271,21 +285,21 @@ CURL *make_curl(const config_t *cfg, idx_t *idx) {
                 if(access(cfg->forms[i].value, R_OK)) {
                     fprintf(stderr, "form file not exists: name: %s, value: %s\n", cfg->forms[i].name, cfg->forms[i].value);
                 } else {
-                    curl_formadd(&req->form, &lastptr,
+                    curl_formadd(&idx->form, &lastptr,
                         CURLFORM_PTRNAME, cfg->forms[i].name,
                         CURLFORM_FILE, cfg->forms[i].value,
                         CURLFORM_END
                     );
                 }
             } else {
-                curl_formadd(&req->form, &lastptr,
+                curl_formadd(&idx->form, &lastptr,
                     CURLFORM_PTRNAME, cfg->forms[i].name,
                     CURLFORM_PTRCONTENTS, cfg->forms[i].value,
                     CURLFORM_END
                 );
             }
         }
-        curl_easy_setopt(curl, CURLOPT_HTTPPOST, req->form);
+        curl_easy_setopt(curl, CURLOPT_HTTPPOST, idx->form);
     }
 
     // set GET
@@ -305,26 +319,31 @@ CURL *make_curl(const config_t *cfg, idx_t *idx) {
 
     if(cfg->append) curl_easy_setopt(curl, CURLOPT_APPEND, 1L);
     if(cfg->upload_file) {
-        req->fp_upload = fopen(cfg->upload_file, "r");
-        if(req->fp_upload) {
-            fseek(req->fp_upload, 0, SEEK_END);
+        idx->fp_upload = fopen(cfg->upload_file, "r");
+        if(idx->fp_upload) {
+            fseek(idx->fp_upload, 0, SEEK_END);
             curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
-            curl_easy_setopt(curl, CURLOPT_READDATA, (void*) req->fp_upload);
+            curl_easy_setopt(curl, CURLOPT_READDATA, (void*) idx->fp_upload);
             curl_easy_setopt(curl, CURLOPT_READFUNCTION, read_callback);
-            curl_easy_setopt(curl, CURLOPT_INFILESIZE_LARGE, (curl_off_t) ftell(req->fp_upload));
-            fseek(req->fp_upload, 0, SEEK_SET);
+            curl_easy_setopt(curl, CURLOPT_INFILESIZE_LARGE, (curl_off_t) ftell(idx->fp_upload));
+            fseek(idx->fp_upload, 0, SEEK_SET);
         } else {
             fprintf(stderr, "open %s failure: %s\n", cfg->upload_file, strerror(errno));
         }
     }
 
+#if 1
     // set KEEPALIVE
     if(cfg->keepalive) {
-        curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
-        curl_easy_setopt(curl, CURLOPT_TCP_KEEPIDLE, 30L);
-        curl_easy_setopt(curl, CURLOPT_TCP_KEEPINTVL, 30L);
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+        curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, cfg->keepalive);
+        curl_easy_setopt(curl, CURLOPT_TCP_KEEPIDLE, cfg->keepalive);
+        curl_easy_setopt(curl, CURLOPT_TCP_KEEPINTVL, cfg->keepalive);
+        curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
     }
+#endif
+
+	curl_easy_setopt(curl, CURLOPT_TIMEOUT, cfg->timeout);
+	curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, cfg->connect_timeout);
 
     // set METHOD
     if(cfg->method) curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, cfg->method);
@@ -336,8 +355,10 @@ CURL *make_curl(const config_t *cfg, idx_t *idx) {
 
 enum {
     FORM_STRING = 128,
+    TIMEOUT,
+    CONNECT_TIMEOUT,
 };
-static const char *options = "hViD:vH:Im:d:GF:C:f:saT:kn:t:c:w:";
+static const char *options = "hViD:vH:Im:d:GF:C:f:saT:k:n:t:c:w:";
 static struct option OPTIONS[] = {
     {"help",            0, 0, 'h' },
     {"version",         0, 0, 'V' },
@@ -358,6 +379,8 @@ static struct option OPTIONS[] = {
     {"append",          0, 0, 'a' },
     {"upload-file",     1, 0, 'T' },
     {"keepalive",       1, 0, 'k' },
+    {"timeout",         1, 0, TIMEOUT },
+    {"connect-timeout", 1, 0, CONNECT_TIMEOUT },
 
     {"requests",        0, 0, 'n' },
     {"timelimit",       0, 0, 't' },
@@ -389,7 +412,9 @@ void usage(char *argv0) {
         "  -s,--cookie-session               Start a new cookie session\n"
         "  -a,--append                       Append to target file when uploading\n"
         "  -T,--upload-file <file>           Transfer local FILE to destination\n"
-        "  -k,--keepalive                    Enable TCP keep-alive\n"
+        "  -k,--keepalive <seconds>          Enable TCP keep-alive\n"
+        "     --timeout <seconds>            Request timeout\n"
+        "     --connect-timeout <seconds>    Connect timeout\n"
 
         "  -n,--requests <requests>          Number of requests to perform\n"
         "  -t,--timelimit <seconds>          Seconds to max. to spend on benchmarking\n"
@@ -415,11 +440,13 @@ int main(int argc, char *argv[]) {
     int c, ind = 0;
     idx_t *idxs;
     CURLM *multi;
-    char fmt[64], *weight = NULL;
+    char fmt[64], *weight = NULL, keepAlive[64];
 
     memset(&cfg, 0, sizeof(cfg));
 
     cfg.concurrency = 10;
+    cfg.timeout = 30;
+    cfg.connect_timeout = 10;
 
     while((c = getopt_long(argc, argv, options, OPTIONS, &ind)) != -1) {
         switch(c) {
@@ -483,27 +510,38 @@ int main(int argc, char *argv[]) {
             case 'C': // cookie
                 cfg.cookie = optarg;
                 break;
-            case 'f':
+            case 'f': // cookie-file
                 cfg.cookie_file = optarg;
                 break;
-            case 's':
+            case 's': // cookie-session
                 cfg.cookie_session = true;
                 break;
-            case 'a':
+            case 'a': // append
                 cfg.append = true;
                 break;
-            case 'T':
+            case 'T': // upload-file
                 cfg.upload_file = optarg;
                 if(access(cfg.upload_file, R_OK)) {
                     fprintf(stderr, "upload file not exists: %s\n", cfg.upload_file);
                     goto end;
                 }
                 break;
-            case 'k':
-                cfg.keepalive = true;
-                cfg.headers[cfg.headerc++] = "Connection: Keep-alive";
-                cfg.headers[cfg.headerc++] = "Keep-Alive: timeout=20";
+            case 'k': // keepalive
+                cfg.keepalive = atoi(optarg);
+                if(cfg.keepalive <= 0) {
+                	cfg.keepalive = 0;
+            	} else {
+            		sprintf(keepAlive, "Keep-Alive: timeout=%d", cfg.keepalive);
+		            cfg.headers[cfg.headerc++] = "Connection: Keep-alive";
+		            cfg.headers[cfg.headerc++] = keepAlive;
+	            }
                 break;
+            case TIMEOUT: // timeout
+            	cfg.timeout = abs(atoi(optarg));
+            	break;
+            case CONNECT_TIMEOUT: // connect-timeout
+            	cfg.connect_timeout = abs(atoi(optarg));
+            	break;
             
             case 'n': // requests
                 cfg.requests = atoi(optarg);
@@ -554,25 +592,27 @@ int main(int argc, char *argv[]) {
 
     if(cfg.info) {
         printf("======== CONFIG INFO BEGIN ========\n");
-        printf("debug: %s\n", cfg.debug);
+        printf("debug: %s\n", cfg.debug ? cfg.debug : "");
         printf("verbose: %s\n", cfg.verbose ? "true" : "false");
         printf("headers: %d\n", cfg.headerc);
         for(c=0; c<cfg.headerc; c++) {
             printf("  %d => %s\n", c, cfg.headers[c]);
         }
         printf("head: %s\n", cfg.head ? "true" : "false");
-        printf("method: %s\n", cfg.method);
-        printf("data: %s\n", cfg.data);
+        printf("method: %s\n", cfg.method ? cfg.method : "");
+        printf("data: %s\n", cfg.data ? cfg.data : "");
         printf("get: %s\n", cfg.get ? "true" : "false");
         printf("forms: %d\n", cfg.formc);
         for(c=0; c<cfg.formc; c++) {
             printf("  %d => is_file: %s, name: %s, value: %s\n", c, cfg.forms[c].is_file ? "true" : "false", cfg.forms[c].name, cfg.forms[c].value);
         }
-        printf("cookie: %s\n", cfg.cookie);
-        printf("cookie_file: %s\n", cfg.cookie_file);
+        printf("cookie: %s\n", cfg.cookie ? cfg.cookie : "");
+        printf("cookie_file: %s\n", cfg.cookie_file ? cfg.cookie_file : "");
         printf("append: %s\n", cfg.append ? "true" : "false");
-        printf("upload_file: %s\n", cfg.upload_file);
-        printf("keepalive: %s\n", cfg.keepalive ? "true" : "false");
+        printf("upload_file: %s\n", cfg.upload_file ? cfg.upload_file : "");
+        printf("keepalive: %d\n", cfg.keepalive);
+        printf("timeout: %d\n", cfg.timeout);
+        printf("connect_timeout: %d\n", cfg.connect_timeout);
         printf("\n");
         printf("urls: %d\n", cfg.urlc);
         for(c=0; c<cfg.urlc; c++) {
@@ -631,9 +671,9 @@ int main(int argc, char *argv[]) {
         CURL *curl;
         CURLMcode mc;
         struct CURLMsg *m;
-        request_t *req;
+        idx_t *idx;
         int code;
-        int concurrency = cfg.concurrency;
+        int concurrency = cfg.concurrency, keepalives = 0;
         long int code0xx = 0, code1xx = 0, code2xx = 0, code3xx = 0, code4xx = 0, code5xx = 0, codex = 0;
         long int begin_reqs = cfg.concurrency, end_reqs = 0, prev_reqs = 0;
         long int prev_req_bytes = 0, prev_res_bytes = 0, prev_bug_bytes = 0;
@@ -660,13 +700,30 @@ int main(int argc, char *argv[]) {
                     curl = m->easy_handle;
 
                     code = 0;
-                    req = NULL;
+                    idx = NULL;
                     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
-                    curl_easy_getinfo(curl, CURLINFO_PRIVATE, &req);
+                    curl_easy_getinfo(curl, CURLINFO_PRIVATE, &idx);
 
-                    curl_multi_remove_handle(multi, curl);
-                    curl_easy_cleanup(curl);
-                    curl = NULL;
+	                curl_multi_remove_handle(multi, curl);
+					if(idx->keepalive) {
+						if(idx->curl != curl) {
+							keepalives ++;
+							if(idx->curl) {
+								curl_easy_cleanup(idx->curl);
+								idx->curl = NULL;
+							}
+						}
+						curl_easy_reset(curl);
+						idx->curl = curl;
+						curl = NULL;
+					} else {
+						if(idx->curl == curl) {
+							keepalives --;
+						}
+		                curl_easy_cleanup(curl);
+						idx->curl = NULL;
+		                curl = NULL;
+	                }
 
                     if(code < 100) {
                         code0xx ++;
@@ -684,24 +741,36 @@ int main(int argc, char *argv[]) {
                         codex ++;
                     }
 
-                    req_times[end_reqs % req_timec] = microtime() - req->idx->time;
+                    req_times[end_reqs % req_timec] = microtime() - idx->time;
                     end_reqs ++;
 
-                    if(req->idx->logfp) fprintf(req->idx->logfp, "%s * END %dst REQUEST - %lf\n", nowtime(), req->idx->reqs,  microtime() - req->idx->time);
+                    if(idx->logfp) fprintf(idx->logfp, "%s * END %dst REQUEST - %lf\n", nowtime(), idx->reqs,  microtime() - idx->time);
+
+                    if(idx->headers) {
+                    	curl_slist_free_all(idx->headers);
+                    	idx->headers = NULL;
+                	}
+                    if(idx->form) {
+                    	curl_formfree(idx->form);
+                    	idx->form = NULL;
+                	}
+                    if(idx->fp_upload) {
+                    	fclose(idx->fp_upload);
+                    	idx->fp_upload = NULL;
+                	}
 
                     if(is_running && (cfg.requests <= 0 || begin_reqs < cfg.requests) && (cfg.timelimit <= 0 || timelimit >= time(NULL))) {
                         begin_reqs ++;
-                        curl_multi_add_handle(multi, make_curl(&cfg, req->idx));
+                        curl_multi_add_handle(multi, make_curl(&cfg, idx));
                     } else {
                         concurrency --;
+                        if(idx->curl) {
+				            curl_easy_cleanup(idx->curl);
+				            idx->curl = NULL;
+				            idx->keepalive = false;
+				            keepalives --;
+                        }
                     }
-
-                    if(req->headers) curl_slist_free_all(req->headers);
-                    if(req->form) curl_formfree(req->form);
-                    if(req->fp_upload)  fclose(req->fp_upload);
-
-                    free(req);
-                    req = NULL;
                 }
             } while(msgs);
 
@@ -729,7 +798,7 @@ int main(int argc, char *argv[]) {
                 	min = 0;
                 }
 
-                printf("times: %d, concurrency: %d, 0xx: %ld, 1xx: %ld, 2xx: %ld, 3xx: %ld, 4xx: %ld, 5xx: %ld, xxx: %ld, reqs: %ld/s, bytes: %s/%s/%s, min: %.1lfms, avg: %.1lfms, max: %.1lfms\n", ++times, concurrency, code0xx, code1xx, code2xx, code3xx, code4xx, code5xx, codex, end_reqs - prev_reqs, fsize(req_bytes - prev_req_bytes, bufs[0]), fsize(res_bytes - prev_res_bytes, bufs[1]), fsize(bug_bytes - prev_bug_bytes, bufs[2]), min * 1000.0f, avg * 1000.0f, max * 1000.0f);
+                printf("times: %d, concurrency: %d, keepalives: %d, 0xx: %ld, 1xx: %ld, 2xx: %ld, 3xx: %ld, 4xx: %ld, 5xx: %ld, xxx: %ld, reqs: %ld/s, bytes: %s/%s/%s, min: %.1lfms, avg: %.1lfms, max: %.1lfms\n", ++times, concurrency, keepalives, code0xx, code1xx, code2xx, code3xx, code4xx, code5xx, codex, end_reqs - prev_reqs, fsize(req_bytes - prev_req_bytes, bufs[0]), fsize(res_bytes - prev_res_bytes, bufs[1]), fsize(bug_bytes - prev_bug_bytes, bufs[2]), min * 1000.0f, avg * 1000.0f, max * 1000.0f);
 
                 prev_reqs = end_reqs;
                 prev_req_bytes = req_bytes;
