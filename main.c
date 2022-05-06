@@ -491,10 +491,10 @@ int main(int argc, char *argv[]) {
                 }
                 char *p = strchr(optarg, '=');
                 if(p) {
-                    bool is_file = (c == 'F' && *p == '@');
+                    bool is_file = (c == 'F' && *(p+1) == '@');
                     cfg.forms[cfg.formc].is_file = is_file;
                     cfg.forms[cfg.formc].name = strndup(optarg, p - optarg);
-                    cfg.forms[cfg.formc].value = strdup(is_file ? p + 1 : p);
+                    cfg.forms[cfg.formc].value = strdup(is_file ? p + 2 : p + 1);
                     if(is_file && access(cfg.forms[cfg.formc].value, R_OK)) {
                         fprintf(stderr, "form file not exists: name: %s, value: %s\n", cfg.forms[cfg.formc].name, cfg.forms[cfg.formc].value);
                         cfg.formc++;
