@@ -18,6 +18,9 @@
 #include <curl/curl.h>
 
 typedef struct {
+    bool isatty_stdout;
+    bool isatty_stderr;
+
     bool info;
     char *debug;
 
@@ -182,8 +185,13 @@ int debug_handler(CURL *handle, curl_infotype type, char *data, size_t size, voi
 }
 
 size_t write_callback(char *ptr, size_t size, size_t nmemb, void *userdata) {
-    // fwrite(ptr, size, nmemb, stderr);
-    return size * nmemb;
+    const config_t *cfg = (const config_t *) userdata;
+
+    if(cfg->isatty_stderr) {
+        return size * nmemb;
+    } else {
+        return fwrite(ptr, size, nmemb, stderr);
+    }
 }
 
 size_t read_callback(char *ptr, size_t size, size_t nmemb, void *userdata) {
@@ -217,6 +225,7 @@ CURL *make_curl(const config_t *cfg, idx_t *idx) {
     curl_easy_setopt(curl, CURLOPT_HEADER, 0L);
     curl_easy_setopt(curl, CURLOPT_HEADERDATA, idx);
     curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_callback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, cfg);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
 
     if(idx->logfile) { // set DEBUG
@@ -451,6 +460,8 @@ int main(int argc, char *argv[]) {
 
     memset(&cfg, 0, sizeof(cfg));
 
+    cfg.isatty_stdout = isatty(STDOUT_FILENO);
+    cfg.isatty_stderr = isatty(STDERR_FILENO);
     cfg.concurrency = 10;
     cfg.timeout = 30;
     cfg.connect_timeout = 10;
