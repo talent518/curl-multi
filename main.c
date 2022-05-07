@@ -182,6 +182,7 @@ int debug_handler(CURL *handle, curl_infotype type, char *data, size_t size, voi
 }
 
 size_t write_callback(char *ptr, size_t size, size_t nmemb, void *userdata) {
+    // fwrite(ptr, size, nmemb, stderr);
     return size * nmemb;
 }
 
@@ -209,7 +210,10 @@ CURL *make_curl(const config_t *cfg, idx_t *idx) {
     curl_easy_setopt(curl, CURLOPT_PRIVATE, idx);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 1);
+    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
+    // curl_easy_setopt(curl, CURLOPT_TRANSFER_ENCODING, 1L);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 10L);
     curl_easy_setopt(curl, CURLOPT_HEADER, 0L);
     curl_easy_setopt(curl, CURLOPT_HEADERDATA, idx);
     curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_callback);
@@ -302,9 +306,6 @@ CURL *make_curl(const config_t *cfg, idx_t *idx) {
         curl_easy_setopt(curl, CURLOPT_HTTPPOST, idx->form);
     }
 
-    // set GET
-    if(cfg->get) curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
-
     // set COOKIE
     if(cfg->cookie) curl_easy_setopt(curl, CURLOPT_COOKIE, cfg->cookie);
 
@@ -342,8 +343,14 @@ CURL *make_curl(const config_t *cfg, idx_t *idx) {
     }
 #endif
 
+    // set TIMEOUT
 	curl_easy_setopt(curl, CURLOPT_TIMEOUT, cfg->timeout);
+
+    // set CONNECT_TIMEOUT
 	curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, cfg->connect_timeout);
+
+    // set GET
+    if(cfg->get) curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
 
     // set METHOD
     if(cfg->method) curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, cfg->method);
